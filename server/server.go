@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"path"
@@ -32,17 +36,15 @@ func StartServer(envType string) {
 		fmt.Printf("error: %s\n", err)
 		return
 	}
-	go func() {
-		for {
-			fmt.Println("waiting for connection")
-			lc, err := l.Accept()
-			if err != nil {
-				fmt.Printf("error: %s\n", err)
-				continue
-			}
-			go handleConn(lc)
+	for {
+		fmt.Println("waiting for connection")
+		lc, err := l.Accept()
+		if err != nil {
+			fmt.Printf("error: %s\n", err)
+			continue
 		}
-	}()
+		go handleConn(lc)
+	}
 }
 func getConf(env string) *ServerConf {
 	configFilePath := path.Join(configPath, configFilePrefix+env+configFilePostfix)
@@ -54,12 +56,43 @@ func getConf(env string) *ServerConf {
 	yaml.Unmarshal(configData, serverConf)
 	return serverConf
 }
-func handleConn(lc net.Conn) {
-	fmt.Printf("accpet remote address %s", lc.RemoteAddr())
-	b := make([]byte, 1024)
-	blen, err := lc.Read(b)
-	if err != nil {
-		fmt.Printf("error: %s\n", err)
+func packetSlitFunc(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	// 检查 atEOF 参数 和 数据包头部的四个字节是否 为 0x123456(我们定义的协议的魔数)
+	if !atEOF && len(data) > 6 && binary.BigEndian.Uint32(data[:4]) == 0x123456 {
+		var l int16
+		// 读出 数据包中 实际数据 的长度(大小为 0 ~ 2^16)
+		binary.Read(bytes.NewReader(data[4:6]), binary.BigEndian, &l)
+		pl := int(l) + 6
+		if pl <= len(data) {
+			return pl, data[:pl], nil
+		}
 	}
-	fmt.Printf("byte read len is %d", blen)
+	return
+}
+
+func handleConn(lc net.Conn) {
+	defer lc.Close()
+	fmt.Printf("accpet remote address %s\n", lc.RemoteAddr())
+	result := bytes.NewBuffer(nil)
+	var buf [65542]byte
+	for {
+		blen, err := lc.Read(buf[0:])
+		result.Write(buf[0:blen])
+		if err != nil {
+			if err == io.EOF {
+				continue
+			} else {
+				fmt.Printf("error: %s\n", err)
+				break
+			}
+		} else {
+			scanner := bufio.NewScanner(result)
+			scanner.Split(packetSlitFunc)
+			for scanner.Scan() {
+				ret := string(scanner.Bytes()[6:])
+				fmt.Printf("message received is %s\n", ret)
+			}
+		}
+		result.Reset()
+	}
 }

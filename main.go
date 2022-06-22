@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"chen.com/file-trans/client"
 	"chen.com/file-trans/server"
 )
 
@@ -24,7 +25,7 @@ func main() {
 		if clientType == "server" {
 			server.StartServer(environmentType)
 		} else if clientType == "client" {
-
+			client.StartClient(environmentType)
 		} else {
 			fmt.Printf("unkown client type %s", clientType)
 		}
