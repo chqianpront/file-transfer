@@ -1,0 +1,12 @@
+name:
+  file-trans
+server:
+  port: 5061
+  ip: 0.0.0.0
+  location: /home/chen/trans-test/
+client:
+  source:
+    port: 5061
+    ip: 127.0.0.1
+  target:
+    location: /
