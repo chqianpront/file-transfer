@@ -9,4 +9,4 @@ client:
     port: 5061
     ip: 127.0.0.1
   target:
-    location: /
+    location: /home/chen/work/ccbft/0225_import
