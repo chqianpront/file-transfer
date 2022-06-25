@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"chen.com/file-trans/models"
@@ -27,26 +28,40 @@ const (
 	cmdDir            = 1
 	cmdFile           = 2
 	cmdErr            = -1
+	cmdEnd            = -2
+	maxFileSize       = 4 * 1024 * 1024 * 1024
 )
 
 var targetAddr string
-var md5Ch chan models.LxFileInfo = make(chan models.LxFileInfo)
+var cmdCh chan models.Command = make(chan models.Command)
 var conn net.Conn
+var wg sync.WaitGroup
 
 func StartClient(envType string) {
 	conf := getConf(envType)
-	defer close(md5Ch)
 	targetAddr = fmt.Sprintf("%s:%d", conf.Client.Source.Ip, conf.Client.Source.Port)
 	var err error
-	conn, err = net.DialTimeout("tcp", targetAddr, time.Second*30)
+	conn, err = net.Dial("tcp", targetAddr)
 	if err != nil {
 		fmt.Printf("connect failed, err : %v\n", err.Error())
 		return
 	}
+	conn.SetDeadline(time.Now().Add(time.Second * 4))
+	defer fmt.Printf("connection closed\n")
 	defer conn.Close()
+
 	targetLocation := conf.Client.Target.Location
-	handleDir(targetLocation)
-	consumeFile()
+	go handleDir(targetLocation)
+	go func() {
+		time.Sleep(time.Second * 2)
+		wg.Wait()
+		fmt.Println("client process end")
+		cmd := models.Command{
+			Type: cmdEnd,
+		}
+		cmdCh <- cmd
+	}()
+	consumeCmd()
 }
 
 func getConf(env string) *models.ClientConf {
@@ -79,19 +94,13 @@ func handleDir(dirPath string) {
 			Type:    cmdDir,
 			DirInfo: lxDirInfo,
 		}
-		str, err := json.Marshal(cmd)
-		if err != nil {
-			fmt.Printf("error: %s\n", err.Error())
-		}
-		sendData(str)
-		readData()
+		cmdCh <- cmd
 		files, err := ioutil.ReadDir(dirPath)
 		if err != nil {
 			fmt.Printf("error: %s\n", err.Error())
 			return
 		}
 		for _, f := range files {
-			fmt.Printf("file name : %s\n", f.Name())
 			childFilePath := filepath.Join(dirPath, f.Name())
 			if f.IsDir() {
 				handleDir(childFilePath)
@@ -104,16 +113,20 @@ func handleDir(dirPath string) {
 	}
 }
 func handleFile(filePath string) {
+	defer wg.Done()
+	wg.Add(1)
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Printf("error: %v\n", err.Error())
 		return
 	}
+	defer file.Close()
 	fileStat, err := file.Stat()
 	if err != nil {
 		fmt.Printf("error: %v\n", err.Error())
 		return
 	}
+	fmt.Printf("handle file: %s\n", filePath)
 	h := md5.New()
 	io.Copy(h, file)
 	lxFileInfo := models.LxFileInfo{
@@ -125,30 +138,46 @@ func handleFile(filePath string) {
 	if lxFileInfo.FileSize <= 0 {
 		return
 	}
-	md5Ch <- lxFileInfo
+	if lxFileInfo.FileSize > maxFileSize {
+		return
+	}
+	cmd := models.Command{
+		Type:     cmdFile,
+		FileInfo: lxFileInfo,
+	}
+	cmdCh <- cmd
 }
-func consumeFile() {
+func consumeCmd() {
 	for {
-		lxFileInfo := <-md5Ch
-		cmd := models.Command{
-			Type:     cmdFile,
-			FileInfo: lxFileInfo,
-		}
-		str, err := json.Marshal(cmd)
-		if err != nil {
-			fmt.Printf("error: %s\n", err.Error())
-		}
-		sendData(str)
-		bres := readData()
-		res := string(bres)
-		switch res {
-		case "OK":
-			transFile(lxFileInfo.Path)
+		cmd := <-cmdCh
+		switch cmd.Type {
+		case cmdDir:
+			str, err := json.Marshal(cmd)
+			if err != nil {
+				fmt.Printf("error: %s\n", err.Error())
+			}
+			sendData(str)
 			readData()
-		case "PASS":
-			fmt.Printf("%s dont need transfer\n", lxFileInfo.Name)
-		case "ERR":
-			fmt.Printf("%s send file error\n", lxFileInfo.Name)
+		case cmdFile:
+			str, err := json.Marshal(cmd)
+			if err != nil {
+				fmt.Printf("error: %s\n", err.Error())
+			}
+			sendData(str)
+			bres := readData()
+			res := string(bres)
+			switch res {
+			case "OK":
+				transFile(cmd.FileInfo.Path)
+				readData()
+			case "PASS":
+				fmt.Printf("%s dont need transfer\n", cmd.FileInfo.Name)
+			case "ERR":
+				fmt.Printf("%s send file error\n", cmd.FileInfo.Name)
+			}
+		case cmdEnd:
+			fmt.Println("==== transfer end ====")
+			return
 		}
 	}
 }

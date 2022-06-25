@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"net"
 	"os"
 	"path"
+	"time"
 
 	"chen.com/file-trans/models"
 	"gopkg.in/yaml.v3"
@@ -71,34 +74,34 @@ func getConf(env string) *ServerConf {
 }
 
 func handleConn(lc net.Conn) {
-	defer lc.Close()
 	defer fmt.Printf("connection close address %s\n", lc.RemoteAddr())
+	defer lc.Close()
 	fmt.Printf("accpet remote address %s\n", lc.RemoteAddr())
+	lc.SetDeadline(time.Now().Add(time.Second * 4))
+
 	for {
 		buf := readFromLc(lc)
 		buf = bytes.Trim(buf, "\x00")
 		if len(buf) <= 0 {
 			continue
 		}
+		if string(buf) == "TIMEOUT" {
+			break
+		}
 		cmd := new(models.Command)
-		// yaml.Unmarshal(buf, cmd)
 		json.Unmarshal(buf, cmd)
-		// fmt.Printf("cmd is %s\n", string(buf))
 		switch cmd.Type {
 		case cmdDir:
-			fmt.Printf("dir command\n")
 			lxDirInfo := cmd.DirInfo
 			destDir := savePath(lxDirInfo.Path)
 			os.MkdirAll(destDir, os.ModePerm)
 			fmt.Printf("dir: %s created\n", destDir)
 			sendToClient(lc, svrOk)
 		case cmdFile:
-			fmt.Printf("file command\n")
 			lxFileInfo := cmd.FileInfo
-			destLocation := path.Join(conf.Server.Location, lxFileInfo.Path)
-			destLocation = savePath(destLocation)
+			destLocation := savePath(lxFileInfo.Path)
 			_, err := os.Stat(destLocation)
-			if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
 				sendToClient(lc, svrOk)
 				recvFile(lc, lxFileInfo)
 				sendToClient(lc, svrOk)
@@ -119,6 +122,7 @@ func recvFile(lc net.Conn, lxFileInfo models.LxFileInfo) {
 	if err != nil {
 		fmt.Printf("error: %s\n", err.Error())
 	}
+	defer file.Close()
 	for {
 		rlen, err := lc.Read(buf)
 		if err != nil {
@@ -182,6 +186,7 @@ func readFromLc(lc net.Conn) []byte {
 		if err == io.EOF {
 		} else {
 			fmt.Println("read err:", err)
+			return []byte("TIMEOUT")
 		}
 	} else {
 		scanner := bufio.NewScanner(result)
